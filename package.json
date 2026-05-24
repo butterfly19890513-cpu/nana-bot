@@ -1,83 +1,16 @@
-const express = require('express');
-const crypto = require('crypto');
-const app = express();
-app.use(express.json());
-
-const { BINGX_API_KEY, BINGX_SECRET, LINE_TOKEN, LINE_USER_ID } = process.env;
-
-// 暫存待確認的訊號
-let pendingOrder = null;
-
-// ── 1. 接收 V3/TradingView 訊號 ──
-app.post('/signal', async (req, res) => {
-  const { symbol, action, price, sl, tp1, tp2, qty } = req.body;
-  pendingOrder = { symbol, action, price, sl, tp1, tp2, qty };
-
-  // 推 LINE 訊息（含確認按鈕）
-  await pushLineConfirm(pendingOrder);
-  res.json({ ok: true });
-});
-
-// ── 2. 推 LINE 確認訊息 ──
-async function pushLineConfirm(o) {
-  const msg = {
-    to: LINE_USER_ID,
-    messages: [{
-      type: 'template',
-      altText: `${o.symbol} ${o.action} 訊號`,
-      template: {
-        type: 'confirm',
-        text: `💎 ${o.symbol} ${o.action}\n進場 ${o.price}\nSL ${o.sl} / TP1 ${o.tp1}\n數量 ${o.qty}\n\n是否下單？`,
-        actions: [
-          { type: 'postback', label: '✅ 確認下單', data: 'confirm' },
-          { type: 'postback', label: '❌ 取消', data: 'cancel' }
-        ]
-      }
-    }]
-  };
-  await fetch('https://api.line.me/v2/bot/message/push', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${LINE_TOKEN}` },
-    body: JSON.stringify(msg)
-  });
-}
-
-// ── 3. 接收 LINE 按鈕回應 ──
-app.post('/webhook', async (req, res) => {
-  const event = req.body.events?.[0];
-  if (event?.type === 'postback') {
-    if (event.postback.data === 'confirm' && pendingOrder) {
-      await placeBingXOrder(pendingOrder);   // 真正下單
-      await replyLine(event.replyToken, '✅ 已送出下單');
-      pendingOrder = null;
-    } else if (event.postback.data === 'cancel') {
-      await replyLine(event.replyToken, '已取消');
-      pendingOrder = null;
-    }
+{
+  "name": "nana-bot",
+  "version": "1.0.0",
+  "description": "NANA V3 交易訊號 LINE 推播後端",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  },
+  "engines": {
+    "node": ">=18"
   }
-  res.sendStatus(200);
-});
-
-// ── 4. BingX 下單（需依官方文件補簽章）──
-async function placeBingXOrder(o) {
-  const ts = Date.now();
-  const params = `symbol=${o.symbol}-USDT&side=${o.action === 'LONG' ? 'BUY' : 'SELL'}`
-    + `&positionSide=${o.action === 'LONG' ? 'LONG' : 'SHORT'}`
-    + `&type=LIMIT&price=${o.price}&quantity=${o.qty}&timestamp=${ts}`;
-  const sign = crypto.createHmac('sha256', BINGX_SECRET).update(params).digest('hex');
-  await fetch(`https://open-api.bingx.com/openApi/swap/v2/trade/order?${params}&signature=${sign}`, {
-    method: 'POST',
-    headers: { 'X-BX-APIKEY': BINGX_API_KEY }
-  });
-  // 下完主單後，再依 sl/tp1 掛止損/止盈單
 }
-
-async function replyLine(token, text) {
-  await fetch('https://api.line.me/v2/bot/message/reply', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${LINE_TOKEN}` },
-    body: JSON.stringify({ replyToken: token, messages: [{ type: 'text', text }] })
-  });
-}
-
-app.listen(process.env.PORT || 3000);
